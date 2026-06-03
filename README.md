@@ -1,5 +1,7 @@
 # 🤖 X BOT — WhatsApp Bot
 
+[![Open in Replit](https://replit.com/badge/github/manx20491-hue/whatsspp-boty-v2)](https://replit.com/github/manx20491-hue/whatsspp-boty-v2)
+
 Built with Baileys. Supports YouTube, TikTok, Instagram, Facebook downloads + Islamic greeting.
 
 ## 📦 Requirements
