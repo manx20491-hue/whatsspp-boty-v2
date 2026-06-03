@@ -294,7 +294,33 @@ async function startBot() {
                 return reply('❌ Reply to a view-once photo or video message using .vv (reply to the message, then send .vv).');
             }
 
-            const cached = viewOnceCache.get(stanzaId);
+            let cached = viewOnceCache.get(stanzaId);
+
+            // Fallback: if cache miss, try to download directly from the quoted message object
+            if (!cached) {
+                const quoted = ctx?.quotedMessage;
+                if (quoted) {
+                    try {
+                        // Build a minimal message object for download/update
+                        let msgToDownload = {
+                            key: { id: stanzaId, remoteJid: from, fromMe: false, participant: ctx?.participant },
+                            message: quoted
+                        };
+                        try { msgToDownload = await sock.updateMediaMessage(msgToDownload); } catch (_) {}
+                        const buffer = await downloadMediaMessage(msgToDownload, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                        // Determine if the quoted content is an image or video
+                        const nested = quoted.viewOnceMessage?.message || quoted.imageMessage || quoted.videoMessage || quoted.viewOnceMessageV2?.message;
+                        const isImage = !!(nested?.imageMessage || nested?.imageMessage?.mimetype || (nested && nested.videoMessage === undefined && buffer && buffer.length));
+                        cached = { buffer, isImage };
+                        viewOnceCache.set(stanzaId, cached);
+                        if (viewOnceCache.size > 50) viewOnceCache.delete(viewOnceCache.keys().next().value);
+                        console.log('[.vv] Directly downloaded & cached for stanzaId:', stanzaId);
+                    } catch (e) {
+                        console.error('[.vv] Direct download FAILED:', e?.message || e);
+                    }
+                }
+            }
+
             if (!cached) {
                 // Provide a concise debug message to help the user
                 return reply(`❌ View-once media not found in cache.\n\nℹ️ Debug: looked for ID ${stanzaId} — cache contains ${viewOnceCache.size} item(s).`);
