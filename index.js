@@ -222,13 +222,13 @@ async function startBot() {
 
         if (cmd === 'menu') {
             const menuText = `╭━━━〔 🤖 X BOT 🤖 〕━━━╮
-┃
-┃ 👑 Owner : xman
-┃ 🌍 Location : Sri Lanka
-┃ ⚡️ Version : 1.0
-┃ 🟢 Status : Active
-┃
-╰━━━━━━━━━━━━━━━━━━━╯
+ ┃
+ ┃ 👑 Owner : xman
+ ┃ 🌍 Location : Sri Lanka
+ ┃ ⚡️ Version : 1.0
+ ┃ 🟢 Status : Active
+ ┃
+ ╰━━━━━━━━━━━━━━━━━━━╯
 
 『 📌 COMMAND MENU 』
 
@@ -284,26 +284,29 @@ async function startBot() {
         }
 
         if (cmd === '.vv') {
+            // Robustly find the referenced message id (stanzaId) from the replied context
             const ctx = msg.message?.extendedTextMessage?.contextInfo;
-            const stanzaId = ctx?.stanzaId;
+            const stanzaId = ctx?.stanzaId || ctx?.quotedMessage?.key?.id || ctx?.quotedMessage?.contextInfo?.stanzaId;
 
-            console.log('[.vv CMD] stanzaId:', stanzaId, '| cache keys:', [...viewOnceCache.keys()]);
+            console.log('[.vv CMD] stanzaId:', stanzaId, '| cache size:', viewOnceCache.size);
 
             if (!stanzaId) {
-                return reply('❌ Reply to a view once photo or video with .vv');
+                return reply('❌ Reply to a view-once photo or video message using .vv (reply to the message, then send .vv).');
             }
 
             const cached = viewOnceCache.get(stanzaId);
             if (!cached) {
-                return reply(`❌ View once media not found in cache.\n\nℹ️ Debug: looking for ID ${stanzaId}\nCache has ${viewOnceCache.size} item(s): ${[...viewOnceCache.keys()].join(', ') || 'none'}`);
+                // Provide a concise debug message to help the user
+                return reply(`❌ View-once media not found in cache.\n\nℹ️ Debug: looked for ID ${stanzaId} — cache contains ${viewOnceCache.size} item(s).`);
             }
 
             try {
                 if (cached.isImage) {
-                    await sock.sendMessage(from, { image: cached.buffer, caption: '📸 *View Once Image — Saved*' });
+                    await sock.sendMessage(from, { image: cached.buffer, caption: '📸 View-Once Image — Saved' }, { quoted: msg });
                 } else {
-                    await sock.sendMessage(from, { video: cached.buffer, caption: '🎥 *View Once Video — Saved*' });
+                    await sock.sendMessage(from, { video: cached.buffer, caption: '🎥 View-Once Video — Saved' }, { quoted: msg });
                 }
+                // Remove from cache after delivering
                 viewOnceCache.delete(stanzaId);
             } catch (e) {
                 console.error('.vv send error:', e);
