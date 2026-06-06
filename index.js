@@ -15,13 +15,7 @@ const app = express();
 let latestQR = null;
 let botStarted = false;
 
-// Configuration
-const MAIN_JID = '639078377857@s.whatsapp.net'; // your main JID
-const SILENT_LISTENER = true; // when true, non-main chats will be silent (no replies visible in their chat)
-
-// Admin forwarding: locked to MAIN_JID
-let adminTarget = MAIN_JID; // JID of chat receiving forwarded messages (main account)
-const ADMIN_PASSWORD = 'Xbot197423';
+// Note: admin/forwarding functionality removed as requested
 
 // Stores pending TikTok download requests: jid -> { url, videoUrl, audioUrl }
 const pendingTT = new Map();
@@ -88,8 +82,7 @@ async function downloadSocialVideo(url, sock, from, msg, reply) {
     exec(command, { timeout: 120000 }, async (err, stdout, stderr) => {
         if (err) {
             console.error('social download failed:', stderr);
-            if (!SILENT_LISTENER || from === MAIN_JID) return reply('❌ Could not download. The video may be private, removed, or requires login.');
-            return;
+            return reply('❌ Could not download. The video may be private, removed, or requires login.');
         }
         await sendVideo(tmpFile, sock, from, msg, reply);
     });
@@ -136,8 +129,7 @@ async function sendVideo(tmpFile, sock, from, msg, reply) {
         const limitBytes = 64 * 1024 * 1024;
         if (statBefore.size > limitBytes) {
             // too large to send as inline video; send thumbnail + link instead
-            if (!SILENT_LISTENER || from === MAIN_JID) return reply('⚠️ Video is too large to send via WhatsApp (~' + Math.round(statBefore.size / (1024*1024)) + ' MB).');
-            return;
+            return reply('⚠️ Video is too large to send via WhatsApp (~' + Math.round(statBefore.size / (1024*1024)) + ' MB).');
         }
 
         // Try to optimize for streaming (move moov atom)
@@ -156,10 +148,10 @@ async function sendVideo(tmpFile, sock, from, msg, reply) {
             // Last resort: try sending as document to ensure delivery (user can download & play locally)
             const fallbackBuf = fs.readFileSync(tmpFile);
             await sock.sendMessage(from, { document: fallbackBuf, fileName: path.basename(tmpFile), mimetype: 'video/mp4' }, { quoted: msg });
-            if (!SILENT_LISTENER || from === MAIN_JID) await reply('Sent as file (document) as a fallback — download and play locally.');
+            await reply('Sent as file (document) as a fallback — download and play locally.');
         } catch (e) {
             console.error('Fallback send error:', e);
-            if (!SILENT_LISTENER || from === MAIN_JID) reply('❌ Downloaded but failed to send. Video may be too large or incompatible.');
+            reply('❌ Downloaded but failed to send. Video may be too large or incompatible.');
         }
     } finally {
         try { fs.unlinkSync(tmpFile); } catch (e) {}
@@ -233,79 +225,6 @@ async function startBot() {
         printQRInTerminal: true
     });
 
-    // helper: forward incoming message to adminTarget (if set)
-    const forwardToAdmin = async (message) => {
-        if (!adminTarget) return;
-        try {
-            // don't forward messages coming from adminTarget or from the bot
-            if (!message || !message.key) return;
-            if (message.key.fromMe) return;
-            const src = message.key.remoteJid;
-            if (!src || src === adminTarget) return;
-
-            // Send only the message content without any header or quoted context so it appears as a fresh message
-            // TEXT
-            const text = message.message?.conversation || message.message?.extendedTextMessage?.text;
-            if (text) {
-                await sock.sendMessage(adminTarget, { text });
-                return;
-            }
-
-            // IMAGE
-            if (message.message.imageMessage || message.message.image) {
-                try {
-                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { image: buf });
-                    return;
-                } catch (e) { console.error('forward image failed', e); }
-            }
-
-            // VIDEO
-            if (message.message.videoMessage || message.message.video) {
-                try {
-                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { video: buf });
-                    return;
-                } catch (e) { console.error('forward video failed', e); }
-            }
-
-            // AUDIO / VOICE
-            if (message.message.audioMessage || message.message.audio) {
-                try {
-                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    const mimetype = message.message.audioMessage?.mimetype || 'audio/ogg; codecs=opus';
-                    const ptt = !!message.message.audioMessage?.ptt;
-                    await sock.sendMessage(adminTarget, { audio: buf, mimetype, ptt });
-                    return;
-                } catch (e) { console.error('forward audio failed', e); }
-            }
-
-            // STICKER
-            if (message.message.stickerMessage) {
-                try {
-                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { sticker: buf });
-                    return;
-                } catch (e) { console.error('forward sticker failed', e); }
-            }
-
-            // DOCUMENT / OTHER
-            if (message.message.documentMessage) {
-                try {
-                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    const fileName = message.message.documentMessage.fileName || 'file';
-                    await sock.sendMessage(adminTarget, { document: buf, fileName });
-                    return;
-                } catch (e) { console.error('forward document failed', e); }
-            }
-
-            // fallback: log unsupported message type
-            console.log('forwardToAdmin: unsupported message type, skipping.');
-        } catch (e) {
-            console.error('forwardToAdmin unexpected error:', e);
-        }
-    };
-
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         const qr = update.qr;
@@ -374,13 +293,9 @@ async function startBot() {
                     const deletedId = msg.message.protocolMessage?.key?.id;
                     const cached = deletedId ? messageCache.get(deletedId) : null;
                     if (cached) {
-                        const alertText = `🚫 *Anti-Delete Alert* 🚫\n\n👤 *From:* ${cached.pushName}\n💬 *Message:* ${cached.text}`;
-                        if (SILENT_LISTENER && from !== MAIN_JID) {
-                            // send the anti-delete alert silently to main admin instead
-                            await sock.sendMessage(adminTarget || MAIN_JID, { text: alertText });
-                        } else {
-                            await sock.sendMessage(from, { text: alertText });
-                        }
+                        await sock.sendMessage(from, {
+                            text: `🚫 *Anti-Delete Alert* 🚫\n\n👤 *From:* ${cached.pushName}\n💬 *Message:* ${cached.text}`
+                        });
                         messageCache.delete(deletedId);
                     }
                 }
@@ -388,18 +303,6 @@ async function startBot() {
                 console.error('Anti-delete error:', e);
             }
             return;
-        }
-
-        // Forward incoming message to admin (if enabled)
-        try {
-            await forwardToAdmin(msg);
-        } catch (e) {
-            console.error('Error forwarding to admin:', e);
-        }
-
-        // If listener is silent, do not reply or process further for non-main chats
-        if (SILENT_LISTENER && from !== MAIN_JID) {
-            return; // do not send any messages back to this chat
         }
 
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
@@ -423,29 +326,9 @@ async function startBot() {
 
         const reply = (content) => sock.sendMessage(from, { text: content }, { quoted: msg });
 
-        // Handle .admin command: only the MAIN_JID can change admin forwarding; ignore others silently
-        if (text.trim().toLowerCase().startsWith('.admin')) {
-            const param = text.replace(/^\.admin\s*/i, '').trim();
-            if (!param) return; // ignore empty
-            if (from !== MAIN_JID) {
-                // silently ignore to avoid revealing forwarding configuration
-                return;
-            }
-            // Only MAIN_JID reaches here
-            if (param.toLowerCase() === 'off' || param.toLowerCase() === 'stop') {
-                adminTarget = null;
-                return reply('✅ Admin forwarding disabled.');
-            }
-            // password is case-sensitive
-            if (param === ADMIN_PASSWORD) {
-                adminTarget = MAIN_JID;
-                return reply('✅ Admin forwarding enabled to main account.');
-            }
-            return reply('❌ Invalid password.');
-        }
+        // Handle .admin command removed (admin functionality fully stripped)
 
-        // The rest of command handling continues as normal (song, video, tt, etc.)
-
+        // Handle pornsearch command
         if (text.trim().toLowerCase().startsWith('.pornsearch')) {
             const q = text.replace(/^\.pornsearch\s*/i, '').trim();
             if (!q) return reply('❌ Usage: .pornsearch <query>');
@@ -476,8 +359,366 @@ async function startBot() {
             return;
         }
 
-        // ... (remaining command handlers unchanged) ...
+        // Handle numeric selection for pornsearch
+        if (/^[1-5]$/.test(cmd) && pendingPorn.has(from)) {
+            const { results } = pendingPorn.get(from);
+            const idx = parseInt(cmd, 10) - 1;
+            if (!results[idx]) return reply('❌ Invalid selection.');
+            pendingPorn.delete(from);
+            await reply('⏳ Processing selection — fetching video info...');
+            const target = results[idx];
+            const tmpFile = path.join(os.tmpdir(), `ph_${Date.now()}.mp4`);
+            try {
+                // Use yt-dlp to extract JSON metadata and find a playable format <= 64MB
+                const info = await new Promise((resolve, reject) => {
+                    exec(`yt-dlp -j --no-playlist "${target.url}"`, { timeout: 120000 }, (err, stdout, stderr) => {
+                        if (err) return reject(stderr || err);
+                        try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
+                    });
+                });
+                const formats = info.formats || [];
+                // prefer mp4/webm formats and sort by filesize approximated
+                const limitBytes = 64 * 1024 * 1024;
+                const candidates = formats.filter(f => f && f.url).filter(f => ['mp4','webm','m4a','mov'].includes((f.ext||'').toLowerCase()));
+                candidates.sort((a,b) => ( (a.filesize || a.filesize_approx || Number.MAX_SAFE_INTEGER) - (b.filesize || b.filesize_approx || Number.MAX_SAFE_INTEGER) ));
+                let chosen = candidates.find(f => (f.filesize || f.filesize_approx || 0) <= limitBytes) || candidates[0];
+                if (!chosen) {
+                    // nothing suitable found
+                    return reply(`⚠️ Could not find a format small enough to send via WhatsApp. Opening page instead: ${target.url}`);
+                }
+                // download chosen format using yt-dlp to ensure a proper playable file
+                if (chosen.format_id) {
+                    await new Promise((resolve, reject) => {
+                        exec(`yt-dlp -f "${chosen.format_id}" --merge-output-format mp4 -o "${tmpFile}" "${target.url}"`, { timeout: 300000 }, (err, stdout, stderr) => {
+                            if (err) return reject(stderr || err);
+                            resolve();
+                        });
+                    });
+                } else {
+                    // fallback: ask yt-dlp to choose a suitable mp4
+                    await new Promise((resolve, reject) => {
+                        exec(`yt-dlp -f "best[ext=mp4]/best" --merge-output-format mp4 -o "${tmpFile}" "${target.url}"`, { timeout: 300000 }, (err, stdout, stderr) => {
+                            if (err) return reject(stderr || err);
+                            resolve();
+                        });
+                    });
+                }
+                const stat = fs.statSync(tmpFile);
+                const sizeMB = stat.size / (1024*1024);
+                console.log('Downloaded file size MB:', sizeMB);
+                if (stat.size <= limitBytes) {
+                    await sendVideo(tmpFile, sock, from, msg, reply);
+                } else {
+                    try { fs.unlinkSync(tmpFile); } catch (e) {}
+                    // send thumbnail + link
+                    const thumbBuf = target.thumbnail ? await axios.get(target.thumbnail, { responseType: 'arraybuffer' }).then(r=>Buffer.from(r.data)).catch(()=>null) : null;
+                    await sock.sendMessage(from, { image: thumbBuf || undefined, caption: `⚠️ Video too large (~${Math.round(sizeMB)} MB).\nHere is the page link: ${target.url}` });
+                }
+            } catch (e) {
+                console.error('porn download error:', e);
+                try { fs.unlinkSync(tmpFile); } catch (ee) {}
+                await reply('❌ Failed to fetch or download the video. Sending page link instead: ' + target.url);
+            }
+            return;
+        }
 
+        if (!msg.key.fromMe && (cmd.includes('as salamu alaykum') || cmd.includes('assalamu alaykum') || cmd.includes('assalamualaikum') || cmd.includes('salam'))) {
+            await reply('Wa alaykum as salam wa rahmatullahi wa barakatuh. 🤍');
+            try {
+                const salamAudio = fs.readFileSync('./salam_reply.ogg');
+                await sock.sendMessage(from, {
+                    audio: salamAudio,
+                    mimetype: 'audio/ogg; codecs=opus',
+                    ptt: true,
+                    seconds: 30
+                }, { quoted: msg });
+            } catch (e) {
+                console.error('Salam audio send error:', e);
+            }
+        }
+
+        if (cmd === 'menu') {
+            const menuText = `╭━━━〔 🤖 X BOT 🤖 〕━━━╮
+ ┃
+ ┃ 👑 Owner : xman
+ ┃ 🌍 Location : Sri Lanka
+ ┃ ⚡️ Version : 1.0
+ ┃ 🟢 Status : Active
+ ┃
+ ╰━━━━━━━━━━━━━━━━━━━╯
+
+『 📌 COMMAND MENU 』
+
+➤ As salamu alaykum
+   └ Islamic greeting reply
+
+➤ menu
+   └ Display all commands
+
+➤ ping
+   └ Check bot response speed
+
+➤ .video <YouTube Link>
+   └ Download video
+
+➤ .song <YouTube Link>
+   └ Download song/audio
+
+➤ .insta <Instagram Link>
+   └ Download Instagram video
+
+➤ .fb <Facebook Link>
+   └ Download Facebook video
+
+➤ .tt <TikTok Link>
+   └ Download TikTok video
+
+━━━━━━━━━━━━━━━━━━━
+
+🌙 X BOT • Made with ❤️
+👑 Created by xman
+🇱🇰 Sri Lanka`;
+            await reply('Wa alaykum as salam wa rahmatullahi wa barakatuh. 🤍');
+            try {
+                const salamAudio = fs.readFileSync('./salam_reply.ogg');
+                await sock.sendMessage(from, {
+                    audio: salamAudio,
+                    mimetype: 'audio/ogg; codecs=opus',
+                    ptt: true,
+                    seconds: 30
+                });
+            } catch (e) {
+                console.error('Menu salam audio error:', e);
+            }
+            await sock.sendMessage(from, {
+                image: fs.readFileSync('./menu.png'),
+                caption: menuText
+            }, { quoted: msg });
+        }
+
+        if (cmd === 'ping') {
+            await reply('pong 🏓');
+        }
+
+        if (cmd === '.vv') {
+            // Robustly find the referenced message id (stanzaId) from the replied context
+            const ctx = msg.message?.extendedTextMessage?.contextInfo;
+            const stanzaId = ctx?.stanzaId || ctx?.quotedMessage?.key?.id || ctx?.quotedMessage?.contextInfo?.stanzaId;
+
+            console.log('[.vv CMD] stanzaId:', stanzaId, '| cache size:', viewOnceCache.size);
+
+            if (!stanzaId) {
+                return reply('❌ Reply to a view-once photo or video message using .vv (reply to the message, then send .vv).');
+            }
+
+            let cached = viewOnceCache.get(stanzaId);
+
+            // Fallback: if cache miss, try to download directly from the quoted message object
+            if (!cached) {
+                const quoted = ctx?.quotedMessage;
+                if (quoted) {
+                    try {
+                        // Build a minimal message object for download/update
+                        let msgToDownload = {
+                            key: { id: stanzaId, remoteJid: from, fromMe: false, participant: ctx?.participant },
+                            message: quoted
+                        };
+                        try { msgToDownload = await sock.updateMediaMessage(msgToDownload); } catch (_) {}
+                        const buffer = await downloadMediaMessage(msgToDownload, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                        // Determine if the quoted content is an image or video
+                        const nested = quoted.viewOnceMessage?.message || quoted.imageMessage || quoted.videoMessage || quoted.viewOnceMessageV2?.message;
+                        const isImage = !!(nested?.imageMessage || nested?.imageMessage?.mimetype || (nested && nested.videoMessage === undefined && buffer && buffer.length));
+                        cached = { buffer, isImage };
+                        viewOnceCache.set(stanzaId, cached);
+                        if (viewOnceCache.size > 50) viewOnceCache.delete(viewOnceCache.keys().next().value);
+                        console.log('[.vv] Directly downloaded & cached for stanzaId:', stanzaId);
+                    } catch (e) {
+                        console.error('[.vv] Direct download FAILED:', e?.message || e);
+                    }
+                }
+            }
+
+            if (!cached) {
+                // Provide a concise debug message to help the user
+                return reply(`❌ View-once media not found in cache.\n\nℹ️ Debug: looked for ID ${stanzaId} — cache contains ${viewOnceCache.size} item(s).`);
+            }
+
+            try {
+                if (cached.isImage) {
+                    await sock.sendMessage(from, { image: cached.buffer, caption: '📸 View-Once Image — Saved' }, { quoted: msg });
+                } else {
+                    await sock.sendMessage(from, { video: cached.buffer, caption: '🎥 View-Once Video — Saved' }, { quoted: msg });
+                }
+                // Remove from cache after delivering
+                viewOnceCache.delete(stanzaId);
+            } catch (e) {
+                console.error('.vv send error:', e);
+                await reply('❌ Failed to send the saved media.');
+            }
+            return;
+        }
+
+        if (cmd === '.antidel on' || cmd === '.antidel off') {
+            const ownerNumber = '94720552037';
+            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\\d+$/, '');
+            if (senderNumber !== ownerNumber && !msg.key.fromMe) {
+                await reply('⛔ Only the owner can use this command.');
+                return;
+            }
+            if (cmd === '.antidel on') {
+                antidelChats.add(from);
+                await reply('🛡️ Anti-Delete *ON* — deleted messages will be revealed.');
+            } else {
+                antidelChats.delete(from);
+                await reply('❌ Anti-Delete *OFF*');
+            }
+            return;
+        }
+
+        if (text.trim().toLowerCase().startsWith('.song')) {
+            const urlMatch = text.match(/(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)[\w\-?=&]+)/i);
+            if (!urlMatch) return reply('❌ Please send a valid YouTube link.\nExample: .song https://youtu.be/xxxxx');
+
+            const url = urlMatch[1];
+            await reply('⏳ Downloading audio... please wait');
+
+            const tmpFile = path.join(os.tmpdir(), `wa_audio_${Date.now()}.mp3`);
+            const command = `yt-dlp --extractor-args \"youtube:player_client=android,ios,mweb\" -x --audio-format mp3 --audio-quality 128K -o \"${tmpFile}\" --no-playlist \"${url}\"`;
+
+            exec(command, { timeout: 120000 }, async (err, stdout, stderr) => {
+                if (err) {
+                    console.error('audio download failed:', stderr);
+                    return reply('❌ Could not download audio. The video may be unavailable.');
+                }
+                try {
+                    const buffer = fs.readFileSync(tmpFile);
+                    await sock.sendMessage(from, {
+                        audio: buffer,
+                        mimetype: 'audio/mpeg',
+                        ptt: false
+                    }, { quoted: msg });
+                } catch (sendErr) {
+                    console.error('Send audio error:', sendErr);
+                    reply('❌ Downloaded but failed to send the audio.');
+                } finally {
+                    try { fs.unlinkSync(tmpFile); } catch (e) {}
+                }
+            });
+        }
+
+        if (text.trim().toLowerCase().startsWith('.insta')) {
+            const urlMatch = text.match(/(https?:\/\/(?:www\.)?instagram\.com\/[\w\/\?\-\=\&\.]+)/i);
+            if (!urlMatch) return reply('❌ Please send a valid Instagram link.\nExample: .insta https://www.instagram.com/p/xxxxx');
+            await reply('⏳ Downloading Instagram video... please wait');
+            await downloadSocialVideo(urlMatch[1], sock, from, msg, reply);
+        }
+
+        if (text.trim().toLowerCase().startsWith('.fb')) {
+            const urlMatch = text.match(/(https?:\/\/(?:www\.|m\.|web\.)?facebook\.com\/[\w\/\?\-\=\&\.]+|https?:\/\/fb\.watch\/[\w\-]+)/i);
+            if (!urlMatch) return reply('❌ Please send a valid Facebook link.\nExample: .fb https://www.facebook.com/watch?v=xxxxx');
+            await reply('⏳ Downloading Facebook video... please wait');
+            await downloadSocialVideo(urlMatch[1], sock, from, msg, reply);
+        }
+
+        if (text.trim().toLowerCase().startsWith('.tt')) {
+            const urlMatch = text.match(/(https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/@[\w.]+\/video\/\d+[\w?=&]*|https?:\/\/(?:vm|vt)\.tiktok\.com\/[\w]+\/?)/i);
+            if (!urlMatch) return reply('❌ Please send a valid TikTok video link.\nExample: .tt https://vm.tiktok.com/xxxxx');
+            const url = urlMatch[1];
+            await reply('⏳ Fetching TikTok info...');
+            try {
+                const result = await TikTokDownloader(url, { version: 'v3' });
+                if (result.status !== 'success' || !result.result) {
+                    return reply('❌ Could not fetch TikTok video. It may be private or deleted.');
+                }
+                const videoUrl = result.result.videoHD || result.result.videoSD;
+                const audioUrl = result.result.videoSD || videoUrl;
+                if (!videoUrl) return reply('❌ No downloadable video found for this TikTok.');
+                pendingTT.set(from, { videoUrl, audioUrl });
+                // Auto-clear after 2 minutes if no reply
+                setTimeout(() => pendingTT.delete(from), 120000);
+                await reply('📥 What format do you want?\n\nReply *mp4* for video 🎬\nReply *mp3* for audio 🎵');
+            } catch (e) {
+                console.error('TikTok error:', e);
+                reply('❌ Failed to fetch TikTok video.');
+            }
+        }
+
+        if (cmd === 'mp4' && pendingTT.has(from)) {
+            const { videoUrl } = pendingTT.get(from);
+            pendingTT.delete(from);
+            await reply('⏳ Sending video... please wait');
+            try {
+                const tmpFile = path.join(os.tmpdir(), `wa_tt_${Date.now()}.mp4`);
+                await downloadUrlToFile(videoUrl, tmpFile);
+                await sendVideo(tmpFile, sock, from, msg, reply);
+            } catch (e) {
+                console.error('TikTok mp4 send error:', e);
+                reply('❌ Failed to send the video.');
+            }
+        }
+
+        if (cmd === 'mp3' && pendingTT.has(from)) {
+            const { audioUrl } = pendingTT.get(from);
+            pendingTT.delete(from);
+            await reply('⏳ Extracting audio... please wait');
+            try {
+                const tmpVideo = path.join(os.tmpdir(), `wa_tt_${Date.now()}_src.mp4`);
+                const tmpAudio = tmpVideo.replace('_src.mp4', '.mp3');
+                await downloadUrlToFile(audioUrl, tmpVideo);
+                await new Promise((resolve, reject) => {
+                    exec(`ffmpeg -i "${tmpVideo}" -q:a 0 -map a "${tmpAudio}" -y`, { timeout: 60000 }, (err) => {
+                        try { fs.unlinkSync(tmpVideo); } catch (e) {}
+                        if (err) reject(err); else resolve();
+                    });
+                });
+                const buffer = fs.readFileSync(tmpAudio);
+                await sock.sendMessage(from, { audio: buffer, mimetype: 'audio/mpeg', ptt: false }, { quoted: msg });
+                try { fs.unlinkSync(tmpAudio); } catch (e) {}
+            } catch (e) {
+                console.error('TikTok mp3 error:', e);
+                reply('❌ Failed to extract audio.');
+            }
+        }
+
+        if (text.trim().toLowerCase().startsWith('.video')) {
+            // Extract YouTube URL from message using regex (handles <url>, plain url, etc.)
+            const urlMatch = text.match(/(https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/)[\w\-?=&]+)/i);
+            if (!urlMatch) return reply('❌ Please send a valid YouTube link.\nExample: .video https://youtu.be/xxxxx');
+
+            const url = urlMatch[1];
+            await reply('⏳ Downloading video... please wait');
+
+            const tmpFile = path.join(os.tmpdir(), `wa_video_${Date.now()}.mp4`);
+
+            // android client reliably returns format 18 (360p MP4) without needing tokens
+            // fallback: ios,mweb uses HLS streams
+            const tryDownload = (extraArgs, cb) => {
+                const command = `yt-dlp ${extraArgs} --merge-output-format mp4 -o "${tmpFile}" --no-playlist "${url}"`;
+                exec(command, { timeout: 120000 }, cb);
+            };
+
+            tryDownload(
+                `--extractor-args \"youtube:player_client=android\" -f \"18/best[height<=480][ext=mp4]/best[height<=480]\"`,
+                async (err, stdout, stderr) => {
+                    if (err) {
+                        console.error('android failed, trying ios+mweb:', stderr);
+                        // Fallback to ios+mweb HLS
+                        tryDownload(
+                            `--extractor-args \"youtube:player_client=ios,mweb\" --format-sort \"res:480,ext:mp4\"`,
+                            async (err2, stdout2, stderr2) => {
+                                if (err2) {
+                                    console.error('ios+mweb also failed:', stderr2);
+                                    return reply('❌ Could not download this video. It may be age-restricted or unavailable.');
+                                }
+                                await sendVideo(tmpFile, sock, from, msg, reply);
+                            }
+                        );
+                        return;
+                    }
+                    await sendVideo(tmpFile, sock, from, msg, reply);
+                }
+            );
+        }
     });
 }
 
