@@ -86,20 +86,76 @@ async function downloadSocialVideo(url, sock, from, msg, reply) {
     });
 }
 
-async function sendVideo(tmpFile, sock, from, msg, reply) {
+// Optimize MP4 for streaming (move moov atom to start). Returns path to file to send.
+async function optimizeMp4ForStreaming(inputPath) {
+    const outPath = inputPath.replace(/\.mp4$/, '_opt.mp4');
     try {
-        // Send by file path/stream instead of reading full buffer to preserve file metadata (moov atom)
-        // This helps WhatsApp clients play the video correctly.
+        // Fast path: try remux/copy with movflags +faststart (no re-encode)
+        await new Promise((resolve, reject) => {
+            exec(`ffmpeg -y -i "${inputPath}" -c copy -movflags +faststart "${outPath}"`, { timeout: 120000 }, (err, stdout, stderr) => {
+                if (err) return reject(stderr || err);
+                resolve();
+            });
+        });
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) return outPath;
+    } catch (e) {
+        console.warn('ffmpeg copy remux failed:', e && (e.message || e));
+    }
+
+    // Fallback: try re-encode to H.264/AAC with faststart
+    try {
+        await new Promise((resolve, reject) => {
+            exec(`ffmpeg -y -i "${inputPath}" -c:v libx264 -c:a aac -movflags +faststart -preset veryfast -crf 23 "${outPath}"`, { timeout: 240000 }, (err) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+        if (fs.existsSync(outPath) && fs.statSync(outPath).size > 0) return outPath;
+    } catch (e) {
+        console.warn('ffmpeg re-encode failed:', e && (e.message || e));
+    }
+
+    // If ffmpeg isn't available or both approaches failed, return original file
+    return inputPath;
+}
+
+async function sendVideo(tmpFile, sock, from, msg, reply) {
+    let optimized = null;
+    try {
+        // If file already too large, bail early
+        const statBefore = fs.statSync(tmpFile);
+        const limitBytes = 64 * 1024 * 1024;
+        if (statBefore.size > limitBytes) {
+            // too large to send as inline video; send thumbnail + link instead
+            return reply('⚠️ Video is too large to send via WhatsApp (~' + Math.round(statBefore.size / (1024*1024)) + ' MB).');
+        }
+
+        // Try to optimize for streaming (move moov atom)
+        optimized = await optimizeMp4ForStreaming(tmpFile);
+        const stat = fs.statSync(optimized);
+
+        // Send by file path/stream and include file metadata for better client handling
         await sock.sendMessage(from, {
-            video: { url: tmpFile },
-            mimetype: 'video/mp4',
-            caption: '✅ Here is your video'
+            video: { url: optimized, fileLength: stat.size, fileName: path.basename(optimized) },
+            caption: '✅ Here is your video',
+            mimetype: 'video/mp4'
         }, { quoted: msg });
     } catch (sendErr) {
         console.error('Send error:', sendErr);
-        reply('❌ Downloaded but failed to send. Video may be too large (WhatsApp limit is ~64MB).');
+        try {
+            // Last resort: try sending as document to ensure delivery (user can download & play locally)
+            const fallbackBuf = fs.readFileSync(tmpFile);
+            await sock.sendMessage(from, { document: fallbackBuf, fileName: path.basename(tmpFile), mimetype: 'video/mp4' }, { quoted: msg });
+            await reply('Sent as file (document) as a fallback — download and play locally.');
+        } catch (e) {
+            console.error('Fallback send error:', e);
+            reply('❌ Downloaded but failed to send. Video may be too large or incompatible.');
+        }
     } finally {
         try { fs.unlinkSync(tmpFile); } catch (e) {}
+        if (optimized && optimized !== tmpFile) {
+            try { fs.unlinkSync(optimized); } catch (e) {}
+        }
     }
 }
 
@@ -380,7 +436,7 @@ async function startBot() {
 ➤ menu
    └ Display all commands
 
-➤ ping
+�� ping
    └ Check bot response speed
 
 ➤ .video <YouTube Link>
