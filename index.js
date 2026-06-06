@@ -382,8 +382,23 @@ async function startBot() {
                     // nothing suitable found
                     return reply(`⚠️ Could not find a format small enough to send via WhatsApp. Opening page instead: ${target.url}`);
                 }
-                // download chosen url directly
-                await downloadUrlToFile(chosen.url, tmpFile);
+                // download chosen format using yt-dlp to ensure a proper playable file
+                if (chosen.format_id) {
+                    await new Promise((resolve, reject) => {
+                        exec(`yt-dlp -f "${chosen.format_id}" --merge-output-format mp4 -o "${tmpFile}" "${target.url}"`, { timeout: 300000 }, (err, stdout, stderr) => {
+                            if (err) return reject(stderr || err);
+                            resolve();
+                        });
+                    });
+                } else {
+                    // fallback: ask yt-dlp to choose a suitable mp4
+                    await new Promise((resolve, reject) => {
+                        exec(`yt-dlp -f "best[ext=mp4]/best" --merge-output-format mp4 -o "${tmpFile}" "${target.url}"`, { timeout: 300000 }, (err, stdout, stderr) => {
+                            if (err) return reject(stderr || err);
+                            resolve();
+                        });
+                    });
+                }
                 const stat = fs.statSync(tmpFile);
                 const sizeMB = stat.size / (1024*1024);
                 console.log('Downloaded file size MB:', sizeMB);
@@ -436,7 +451,7 @@ async function startBot() {
 ➤ menu
    └ Display all commands
 
-�� ping
+➤ ping
    └ Check bot response speed
 
 ➤ .video <YouTube Link>
@@ -605,7 +620,7 @@ async function startBot() {
         }
 
         if (text.trim().toLowerCase().startsWith('.tt')) {
-            const urlMatch = text.match(/(https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/@[\w.]+\/video\/\d+[\w?=&]*|https?:\/\/(?:vm|vt)\.tiktok\.com\/[\w]+\/?)/i);
+            const urlMatch = text.match(/(https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/@[\w.]+\\/video\/\d+[\w?=&]*|https?:\/\/(?:vm|vt)\.tiktok\.com\/[\w]+\/?)/i);
             if (!urlMatch) return reply('❌ Please send a valid TikTok video link.\nExample: .tt https://vm.tiktok.com/xxxxx');
             const url = urlMatch[1];
             await reply('⏳ Fetching TikTok info...');
