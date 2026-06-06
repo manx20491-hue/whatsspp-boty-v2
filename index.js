@@ -304,31 +304,44 @@ async function startBot() {
             const idx = parseInt(cmd, 10) - 1;
             if (!results[idx]) return reply('❌ Invalid selection.');
             pendingPorn.delete(from);
-            await reply('⏳ Downloading selected video — this may take a while.');
+            await reply('⏳ Processing selection — fetching video info...');
             const target = results[idx];
             const tmpFile = path.join(os.tmpdir(), `ph_${Date.now()}.mp4`);
             try {
-                // use yt-dlp to download best available
-                await new Promise((resolve, reject) => {
-                    const cmdline = `yt-dlp -f best -o "${tmpFile}" "${target.url}"`;
-                    exec(cmdline, { timeout: 5 * 60 * 1000 }, (err, stdout, stderr) => {
+                // Use yt-dlp to extract JSON metadata and find a playable format <= 64MB
+                const info = await new Promise((resolve, reject) => {
+                    exec(`yt-dlp -j --no-playlist "${target.url}"`, { timeout: 120000 }, (err, stdout, stderr) => {
                         if (err) return reject(stderr || err);
-                        resolve();
+                        try { resolve(JSON.parse(stdout)); } catch (e) { reject(e); }
                     });
                 });
+                const formats = info.formats || [];
+                // prefer mp4/webm formats and sort by filesize approximated
+                const limitBytes = 64 * 1024 * 1024;
+                const candidates = formats.filter(f => f && f.url).filter(f => ['mp4','webm','m4a','mov'].includes((f.ext||'').toLowerCase()));
+                candidates.sort((a,b) => ( (a.filesize || a.filesize_approx || Number.MAX_SAFE_INTEGER) - (b.filesize || b.filesize_approx || Number.MAX_SAFE_INTEGER) ));
+                let chosen = candidates.find(f => (f.filesize || f.filesize_approx || 0) <= limitBytes) || candidates[0];
+                if (!chosen) {
+                    // nothing suitable found
+                    return reply(`⚠️ Could not find a format small enough to send via WhatsApp. Opening page instead: ${target.url}`);
+                }
+                // download chosen url directly
+                await downloadUrlToFile(chosen.url, tmpFile);
                 const stat = fs.statSync(tmpFile);
                 const sizeMB = stat.size / (1024*1024);
                 console.log('Downloaded file size MB:', sizeMB);
-                if (stat.size <= 64 * 1024 * 1024) {
+                if (stat.size <= limitBytes) {
                     await sendVideo(tmpFile, sock, from, msg, reply);
                 } else {
                     try { fs.unlinkSync(tmpFile); } catch (e) {}
-                    await sock.sendMessage(from, { image: target.thumbnail ? (await axios.get(target.thumbnail, { responseType: 'arraybuffer' }).then(r => Buffer.from(r.data))) : undefined, caption: `⚠️ Video is too large to send via WhatsApp (~${Math.round(sizeMB)} MB).\nHere is the page link: ${target.url}` });
+                    // send thumbnail + link
+                    const thumbBuf = target.thumbnail ? await axios.get(target.thumbnail, { responseType: 'arraybuffer' }).then(r=>Buffer.from(r.data)).catch(()=>null) : null;
+                    await sock.sendMessage(from, { image: thumbBuf || undefined, caption: `⚠️ Video too large (~${Math.round(sizeMB)} MB).\nHere is the page link: ${target.url}` });
                 }
             } catch (e) {
                 console.error('porn download error:', e);
                 try { fs.unlinkSync(tmpFile); } catch (ee) {}
-                await reply('❌ Failed to download the selected video. It may be blocked or yt-dlp failed.');
+                await reply('❌ Failed to fetch or download the video. Sending page link instead: ' + target.url);
             }
             return;
         }
