@@ -88,9 +88,10 @@ async function downloadSocialVideo(url, sock, from, msg, reply) {
 
 async function sendVideo(tmpFile, sock, from, msg, reply) {
     try {
-        const buffer = fs.readFileSync(tmpFile);
+        // Send by file path/stream instead of reading full buffer to preserve file metadata (moov atom)
+        // This helps WhatsApp clients play the video correctly.
         await sock.sendMessage(from, {
-            video: buffer,
+            video: { url: tmpFile },
             mimetype: 'video/mp4',
             caption: '✅ Here is your video'
         }, { quoted: msg });
@@ -487,7 +488,7 @@ async function startBot() {
 
         if (cmd === '.antidel on' || cmd === '.antidel off') {
             const ownerNumber = '94720552037';
-            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\d+$/, '');
+            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\\d+$/, '');
             if (senderNumber !== ownerNumber && !msg.key.fromMe) {
                 await reply('⛔ Only the owner can use this command.');
                 return;
