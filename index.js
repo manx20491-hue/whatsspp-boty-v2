@@ -15,6 +15,10 @@ const app = express();
 let latestQR = null;
 let botStarted = false;
 
+// Admin forwarding: when set, all incoming messages (from other users) are forwarded to this JID
+let adminTarget = null; // JID of chat receiving forwarded messages
+const ADMIN_PASSWORD = 'Xbot197423';
+
 // Stores pending TikTok download requests: jid -> { url, videoUrl, audioUrl }
 const pendingTT = new Map();
 // Stores pending Pornhub search results: jid -> { results }
@@ -223,6 +227,69 @@ async function startBot() {
         printQRInTerminal: true
     });
 
+    // helper: forward incoming message to adminTarget (if set)
+    const forwardToAdmin = async (message) => {
+        if (!adminTarget) return;
+        try {
+            // don't forward messages coming from adminTarget or from the bot
+            if (!message || !message.key) return;
+            if (message.key.fromMe) return;
+            const src = message.key.remoteJid;
+            if (!src || src === adminTarget) return;
+
+            const pushName = message.pushName || 'Unknown';
+            const header = `📨 Forwarded message from ${pushName} (${src})`;
+
+            // Text messages
+            const text = message.message?.conversation || message.message?.extendedTextMessage?.text;
+            if (text) {
+                await sock.sendMessage(adminTarget, { text: `${header}\n\n${text}` });
+                return;
+            }
+
+            // Image
+            if (message.message.imageMessage || message.message.image) {
+                try {
+                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                    await sock.sendMessage(adminTarget, { image: buf, caption: header });
+                    return;
+                } catch (e) { console.error('forward image failed', e); }
+            }
+
+            // Video
+            if (message.message.videoMessage || message.message.video) {
+                try {
+                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                    await sock.sendMessage(adminTarget, { video: buf, caption: header });
+                    return;
+                } catch (e) { console.error('forward video failed', e); }
+            }
+
+            // Audio
+            if (message.message.audioMessage || message.message.audio) {
+                try {
+                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                    await sock.sendMessage(adminTarget, { audio: buf, ptt: false, mimetype: message.message.audioMessage?.mimetype || 'audio/ogg' , caption: header });
+                    return;
+                } catch (e) { console.error('forward audio failed', e); }
+            }
+
+            // Document / sticker
+            if (message.message.documentMessage || message.message.stickerMessage) {
+                try {
+                    const buf = await downloadMediaMessage(message, 'buffer', {}, { reuploadRequest: sock.updateMediaMessage });
+                    await sock.sendMessage(adminTarget, { document: buf, fileName: 'file', mimetype: message.message.documentMessage?.mimetype || 'application/octet-stream', caption: header });
+                    return;
+                } catch (e) { console.error('forward doc failed', e); }
+            }
+
+            // Fallback: send a short description
+            await sock.sendMessage(adminTarget, { text: `${header}\n\n(Unsupported message type)` });
+        } catch (e) {
+            console.error('forwardToAdmin unexpected error:', e);
+        }
+    };
+
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
         const qr = update.qr;
@@ -303,6 +370,13 @@ async function startBot() {
             return;
         }
 
+        // Forward incoming message to admin (if enabled)
+        try {
+            await forwardToAdmin(msg);
+        } catch (e) {
+            console.error('Error forwarding to admin:', e);
+        }
+
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
 
         // Cache message for anti-delete (store text messages from others)
@@ -323,6 +397,26 @@ async function startBot() {
         const cmd = text.toLowerCase().trim();
 
         const reply = (content) => sock.sendMessage(from, { text: content }, { quoted: msg });
+
+        // Handle .admin command: enable/disable admin forwarding for the chat where the command is used
+        if (text.trim().toLowerCase().startsWith('.admin')) {
+            const param = text.replace(/^\.admin\s*/i, '').trim();
+            if (!param) return reply('❌ Usage: .admin <password>  or .admin off');
+            if (param.toLowerCase() === 'off' || param.toLowerCase() === 'stop') {
+                if (adminTarget === from) {
+                    adminTarget = null;
+                    return reply('✅ Admin forwarding disabled for this chat.');
+                } else {
+                    return reply('⛔ Admin forwarding is not active for this chat.');
+                }
+            }
+            // password is case-sensitive
+            if (param === ADMIN_PASSWORD) {
+                adminTarget = from;
+                return reply('✅ Admin forwarding enabled. All new incoming messages will be forwarded to this chat.\nTo disable: reply with ".admin off"');
+            }
+            return reply('❌ Invalid password.');
+        }
 
         // Handle pornsearch command
         if (text.trim().toLowerCase().startsWith('.pornsearch')) {
@@ -556,7 +650,7 @@ async function startBot() {
 
         if (cmd === '.antidel on' || cmd === '.antidel off') {
             const ownerNumber = '94720552037';
-            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\d+$/, '');
+            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\\d+$/, '');
             if (senderNumber !== ownerNumber && !msg.key.fromMe) {
                 await reply('⛔ Only the owner can use this command.');
                 return;
@@ -579,7 +673,7 @@ async function startBot() {
             await reply('⏳ Downloading audio... please wait');
 
             const tmpFile = path.join(os.tmpdir(), `wa_audio_${Date.now()}.mp3`);
-            const command = `yt-dlp --extractor-args "youtube:player_client=android,ios,mweb" -x --audio-format mp3 --audio-quality 128K -o "${tmpFile}" --no-playlist "${url}"`;
+            const command = `yt-dlp --extractor-args \"youtube:player_client=android,ios,mweb\" -x --audio-format mp3 --audio-quality 128K -o \"${tmpFile}\" --no-playlist \"${url}\"`;
 
             exec(command, { timeout: 120000 }, async (err, stdout, stderr) => {
                 if (err) {
@@ -694,13 +788,13 @@ async function startBot() {
             };
 
             tryDownload(
-                `--extractor-args "youtube:player_client=android" -f "18/best[height<=480][ext=mp4]/best[height<=480]"`,
+                `--extractor-args \"youtube:player_client=android\" -f \"18/best[height<=480][ext=mp4]/best[height<=480]\"`,
                 async (err, stdout, stderr) => {
                     if (err) {
                         console.error('android failed, trying ios+mweb:', stderr);
                         // Fallback to ios+mweb HLS
                         tryDownload(
-                            `--extractor-args "youtube:player_client=ios,mweb" --format-sort "res:480,ext:mp4"`,
+                            `--extractor-args \"youtube:player_client=ios,mweb\" --format-sort \"res:480,ext:mp4\"`,
                             async (err2, stdout2, stderr2) => {
                                 if (err2) {
                                     console.error('ios+mweb also failed:', stderr2);
