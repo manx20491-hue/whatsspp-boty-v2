@@ -8,6 +8,8 @@ const express = require('express');
 const QRCode = require('qrcode');
 const { exec } = require('child_process');
 const os = require('os');
+const axios = require('axios');
+const cheerio = require('cheerio');
 
 const app = express();
 let latestQR = null;
@@ -15,6 +17,8 @@ let botStarted = false;
 
 // Stores pending TikTok download requests: jid -> { url, videoUrl, audioUrl }
 const pendingTT = new Map();
+// Stores pending Pornhub search results: jid -> { results }
+const pendingPorn = new Map();
 
 // Anti-delete: chats where it's enabled, and cache of recent messages
 const antidelChats = new Set();
@@ -26,6 +30,10 @@ const viewOnceCache = new Map(); // msgId -> { buffer, isImage }
 // Ensure auth folder exists
 if (!fs.existsSync('./auth')) {
     fs.mkdirSync('./auth');
+}
+// Ensure saved_vv folder exists for debugging/persistent saves
+if (!fs.existsSync('./saved_vv')) {
+    try { fs.mkdirSync('./saved_vv'); } catch (e) {}
 }
 
 app.get('/health', (req, res) => {
@@ -94,6 +102,59 @@ async function sendVideo(tmpFile, sock, from, msg, reply) {
     }
 }
 
+// Search Pornhub for a query and return up to `limit` results
+async function searchPornhub(query, limit = 5) {
+    const results = [];
+    try {
+        const url = `https://www.pornhub.com/video/search?search=${encodeURIComponent(query)}`;
+        const res = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+        const $ = cheerio.load(res.data);
+        // Try selectors that commonly contain video items
+        const anchors = new Map();
+        $('a').each((i, el) => {
+            const href = $(el).attr('href');
+            if (!href) return;
+            if (href.includes('/view_video.php') || href.match(/\/view_video.php\?viewkey=/)) {
+                if (!anchors.has(href)) anchors.set(href, $(el));
+            }
+        });
+        for (const [href, el] of anchors) {
+            if (results.length >= limit) break;
+            try {
+                const a = el;
+                // find a parent element to extract thumbnail/title/duration
+                const parent = a.closest('.phimage, .search-video, .videoPreviewBg, .thumbnail');
+                let thumb = a.find('img').attr('data-src') || a.find('img').attr('data-thumb_url') || a.find('img').attr('src');
+                if (!thumb && parent) thumb = parent.find('img').attr('data-src') || parent.find('img').attr('src');
+                let title = a.find('img').attr('alt') || a.attr('title') || parent?.find('.title')?.text?.() || '';
+                title = (title || '').trim();
+                let duration = a.find('.duration').text() || parent?.find('.duration')?.text() || '';
+                const fullUrl = href.startsWith('http') ? href : `https://www.pornhub.com${href}`;
+                results.push({ title: title || 'Untitled', url: fullUrl, thumbnail: thumb || '', duration: (duration || '').trim() });
+            } catch (e) {
+                continue;
+            }
+        }
+        // If not enough results, try another selector approach (cards)
+        if (results.length < limit) {
+            $('.phimage, .search-video, .videoPreviewBg').each((i, el) => {
+                if (results.length >= limit) return;
+                const anchor = $(el).find('a').first();
+                const href = anchor.attr('href');
+                if (!href) return;
+                const thumb = $(el).find('img').attr('data-src') || $(el).find('img').attr('src') || '';
+                const title = $(el).find('img').attr('alt') || $(el).find('.title').text() || '';
+                const duration = $(el).find('.duration').text() || '';
+                const fullUrl = href.startsWith('http') ? href : `https://www.pornhub.com${href}`;
+                if (!results.find(r => r.url === fullUrl)) results.push({ title: (title||'Untitled').trim(), url: fullUrl, thumbnail: thumb, duration: duration.trim() });
+            });
+        }
+    } catch (err) {
+        console.error('searchPornhub error:', err?.message || err);
+    }
+    return results.slice(0, limit);
+}
+
 async function startBot() {
     if (botStarted) return;
     botStarted = true;
@@ -153,6 +214,7 @@ async function startBot() {
                     const isImage = !!(voInner?.imageMessage || rawMsg.imageMessage);
                     viewOnceCache.set(scanMsg.key.id, { buffer, isImage });
                     if (viewOnceCache.size > 50) viewOnceCache.delete(viewOnceCache.keys().next().value);
+                    try { fs.writeFileSync(`./saved_vv/${scanMsg.key.id}${isImage?'.jpg':'.mp4'}`, buffer); } catch (e) {}
                     console.log('[.vv] Cached! id:', scanMsg.key.id, '| size:', viewOnceCache.size);
                 } catch (e) {
                     console.error('[.vv] Download FAILED:', e.message);
@@ -205,6 +267,72 @@ async function startBot() {
 
         const reply = (content) => sock.sendMessage(from, { text: content }, { quoted: msg });
 
+        // Handle pornsearch command
+        if (text.trim().toLowerCase().startsWith('.pornsearch')) {
+            const q = text.replace(/^\.pornsearch\s*/i, '').trim();
+            if (!q) return reply('❌ Usage: .pornsearch <query>');
+            await reply('🔞 Searching Pornhub — please wait (you must be 18+).');
+            const results = await searchPornhub(q, 5);
+            if (!results || results.length === 0) return reply('❌ No results found.');
+            // store pending
+            pendingPorn.set(from, { results });
+            setTimeout(() => pendingPorn.delete(from), 120000);
+            // build list text
+            let listText = `🔎 Results for "${q}"\n\n`;
+            results.forEach((r, i) => {
+                listText += `${i+1}) ${r.title}${r.duration ? ' — ' + r.duration : ''}\n`;
+            });
+            listText += '\nReply with the number to download (e.g. 1)';
+            // send first thumbnail with list as caption if available
+            const firstThumb = results[0].thumbnail;
+            if (firstThumb) {
+                try {
+                    const thumbBuf = await axios.get(firstThumb, { responseType: 'arraybuffer' }).then(res => Buffer.from(res.data));
+                    await sock.sendMessage(from, { image: thumbBuf, caption: listText }, { quoted: msg });
+                } catch (e) {
+                    await reply(listText);
+                }
+            } else {
+                await reply(listText);
+            }
+            return;
+        }
+
+        // Handle numeric selection for pornsearch
+        if (/^[1-5]$/.test(cmd) && pendingPorn.has(from)) {
+            const { results } = pendingPorn.get(from);
+            const idx = parseInt(cmd, 10) - 1;
+            if (!results[idx]) return reply('❌ Invalid selection.');
+            pendingPorn.delete(from);
+            await reply('⏳ Downloading selected video — this may take a while.');
+            const target = results[idx];
+            const tmpFile = path.join(os.tmpdir(), `ph_${Date.now()}.mp4`);
+            try {
+                // use yt-dlp to download best available
+                await new Promise((resolve, reject) => {
+                    const cmdline = `yt-dlp -f best -o "${tmpFile}" "${target.url}"`;
+                    exec(cmdline, { timeout: 5 * 60 * 1000 }, (err, stdout, stderr) => {
+                        if (err) return reject(stderr || err);
+                        resolve();
+                    });
+                });
+                const stat = fs.statSync(tmpFile);
+                const sizeMB = stat.size / (1024*1024);
+                console.log('Downloaded file size MB:', sizeMB);
+                if (stat.size <= 64 * 1024 * 1024) {
+                    await sendVideo(tmpFile, sock, from, msg, reply);
+                } else {
+                    try { fs.unlinkSync(tmpFile); } catch (e) {}
+                    await sock.sendMessage(from, { image: target.thumbnail ? (await axios.get(target.thumbnail, { responseType: 'arraybuffer' }).then(r => Buffer.from(r.data))) : undefined, caption: `⚠️ Video is too large to send via WhatsApp (~${Math.round(sizeMB)} MB).\nHere is the page link: ${target.url}` });
+                }
+            } catch (e) {
+                console.error('porn download error:', e);
+                try { fs.unlinkSync(tmpFile); } catch (ee) {}
+                await reply('❌ Failed to download the selected video. It may be blocked or yt-dlp failed.');
+            }
+            return;
+        }
+
         if (!msg.key.fromMe && (cmd.includes('as salamu alaykum') || cmd.includes('assalamu alaykum') || cmd.includes('assalamualaikum') || cmd.includes('salam'))) {
             await reply('Wa alaykum as salam wa rahmatullahi wa barakatuh. 🤍');
             try {
@@ -255,6 +383,9 @@ async function startBot() {
 
 ➤ .tt <TikTok Link>
    └ Download TikTok video
+
+➤ .pornsearch <query>
+   └ Search Pornhub and download selected video (18+)
 
 ━━━━━━━━━━━━━━━━━━━
 
