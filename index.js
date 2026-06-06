@@ -620,7 +620,7 @@ async function startBot() {
         }
 
         if (text.trim().toLowerCase().startsWith('.tt')) {
-            const urlMatch = text.match(/(https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/@[\w.]+\\/video\/\d+[\w?=&]*|https?:\/\/(?:vm|vt)\.tiktok\.com\/[\w]+\/?)/i);
+            const urlMatch = text.match(/(https?:\/\/(?:www\.|vm\.|vt\.)?tiktok\.com\/@[\w.]+\/video\/\d+[\w?=&]*|https?:\/\/(?:vm|vt)\.tiktok\.com\/[\w]+\/?)/i);
             if (!urlMatch) return reply('❌ Please send a valid TikTok video link.\nExample: .tt https://vm.tiktok.com/xxxxx');
             const url = urlMatch[1];
             await reply('⏳ Fetching TikTok info...');
