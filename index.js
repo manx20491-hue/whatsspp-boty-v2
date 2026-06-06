@@ -469,9 +469,6 @@ async function startBot() {
 ➤ .tt <TikTok Link>
    └ Download TikTok video
 
-➤ .pornsearch <query>
-   └ Search Pornhub and download selected video (18+)
-
 ━━━━━━━━━━━━━━━━━━━
 
 🌙 X BOT • Made with ❤️
@@ -559,7 +556,7 @@ async function startBot() {
 
         if (cmd === '.antidel on' || cmd === '.antidel off') {
             const ownerNumber = '94720552037';
-            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\\d+$/, '');
+            const senderNumber = from.replace(/[^0-9]/g, '').replace(/:\d+$/, '');
             if (senderNumber !== ownerNumber && !msg.key.fromMe) {
                 await reply('⛔ Only the owner can use this command.');
                 return;
